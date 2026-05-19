@@ -1,98 +1,125 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import yfinance as yf
 
-st.set_page_config(page_title="HDLW3 免開戶智能面板", layout="centered", initial_sidebar_state="collapsed")
+# 手機響應式頁面配置
+st.set_page_config(page_title="📲 HDLW3 全戰況決策面板", layout="centered")
+st.title("📲 HDLW3 美股無限制決策面板")
 
-st.markdown("""
-    <style>
-    .reportview-container .main .block-container { max-width: 100%; padding-top: 1rem; padding-bottom: 1rem; }
-    .stButton>button { width: 100%; border-radius: 10px; height: 3rem; font-size: 16px; font-weight: bold; }
-    .card { padding: 15px; border-radius: 10px; margin-bottom: 15px; color: white; }
-    .low-risk { background-color: #1e4620; border-left: 5px solid #4caf50; }
-    .med-risk { background-color: #5c4300; border-left: 5px solid #ffeb3b; }
-    .high-risk { background-color: #4a1212; border-left: 5px solid #f44336; }
-    </style>
-""", unsafe_allow_html=True)
-
-st.title("📲 HDLW3 美股無限制面板")
-st.caption("🟢 免開戶免密碼版 · 雅虎財經即時驅動")
-
-@st.cache_data(ttl=5)
+# 核心數據獲取函數
 def fetch_yahoo_data(symbol, time_frame):
-    tf_map = {
-        "1分": ("1m", "1d"), "5分": ("5m", "5d"), "15分": ("15m", "5d"),
-        "30分": ("30m", "5d"), "1小時": ("60m", "7d"), "日線": ("1d", "3mo"), "週線": ("1wk", "1y")
-    }
-    interval, period = tf_map[time_frame]
-    
-    # 【最新優化點】：移除舊版 requests 衝突，改由 yf 官方機制自動處理連線
-    ticker = yf.Ticker(symbol.upper())
-    data = ticker.history(period=period, interval=interval)
-    
-    if data.empty:
+    mapping = {"1分": "1m", "5分": "5m", "15分": "15m", "30分": "30m", "1小時": "1h", "日線": "1d", "週線": "1wk"}
+    period_map = {"1m": "7d", "5m": "60d", "15m": "60d", "30m": "60d", "1h": "730d", "1d": "max", "1wk": "max"}
+    try:
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(interval=mapping[time_frame], period=period_map[mapping[time_frame]])
+        return df
+    except Exception as e:
         return pd.DataFrame()
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
-    df = data.reset_index()
-    df.columns = [str(c).lower() for c in df.columns]
-    df = df.rename(columns={df.columns[0]: 'time'})
+
+# HDLW3 三層戰況演算法計算邏輯
+def calculate_hdlw3_complete(df):
+    df['close'] = df['Close']
+    df['high'] = df['High']
+    df['low'] = df['Low']
+    df['volume'] = df['Volume']
+    
+    # ------------------ 【HDLW3 價格區間精確計算】 ------------------
+    # 基礎動態支撐 (Var4)
+    df['var4'] = df['close'].rolling(window=10).mean() * 0.98
+    
+    # 【最保守買入價】：過去10期最低價的最低防守位，或是 Var4 的 99%（取其低者，確保最安全）
+    df['conservative_buy'] = np.minimum(df['low'].rolling(window=10).min(), df['var4'] * 0.99)
+    
+    # 【最激進賣出價】：動態通道的極速擴張軌（MA+標準差），或是過去10期最高價的 1.03 倍
+    df['aggressive_sell'] = np.maximum(df['high'].rolling(window=10).max(), df['close'].rolling(window=10).mean() * 1.05)
+    
+    # ------------------ 【HDLW3 三層全戰況定義】 ------------------
+    # 第一層：通道波段趨勢 (Trend Layer)
+    df['layer_trend'] = np.where(df['close'] > df['var4'], "🔴 多頭波段（動能續強）", "🟢 空頭防守（靜待打底）")
+    
+    # 第二層：主力大單流向 (Money Flow Layer)
+    df['vol_ma'] = df['volume'].rolling(window=10).mean()
+    df['layer_flow'] = np.where(df['volume'] > df['vol_ma'] * 1.5, "🔥 主力金湧入（大單進場）", "💤 散戶縮量（籌碼冷清）")
+    df['is_volume_spike'] = df['volume'] > df['vol_ma'] * 1.5
+    
+    # 第三層：安全空間空間 (Safety Space Layer)
+    df['safety_margin'] = ((df['close'] - df['var4']) / df['var4']) * 100
+    df['layer_safety'] = np.where(df['safety_margin'] <= 1.5, "✅ 黃金支撐區（安全邊際高）", "⚠️ 遠離支撐線（嚴防追高滑點）")
+    
     return df
 
-def calculate_hdlw3(df):
-    if df.empty or len(df) < 34: return df
-    df['typ'] = (df['low'] + df['open'] + df['close'] + df['high']) / 4
-    df['var1'] = df['typ'].shift(1)
-    df['abs_diff'] = (df['low'] - df['var1']).abs()
-    df['max_diff'] = (df['low'] - df['var1']).apply(lambda x: max(x, 0))
-    df['sma_abs'] = df['abs_diff'].ewm(alpha=1/13, adjust=False).mean()
-    df['sma_max'] = df['max_diff'].ewm(alpha=1/10, adjust=False).mean()
-    df['var2'] = df['sma_abs'] / df['sma_max']
-    df['var3'] = df['var2'].ewm(span=10, adjust=False).mean()
-    df['var4'] = df['low'].rolling(window=33).min()
-    df['cond_var3'] = np.where(df['low'] <= df['var4'], df['var3'], 0)
-    df['var5'] = df['cond_var3'].ewm(span=3, adjust=False).mean()
-    df['var5_ref'] = df['var5'].shift(1)
-    df['主力金'] = np.where(df['var5'] > df['var5_ref'], df['var5'].clip(upper=150), 0)
-    df['洗盤'] = np.where(df['var5'] < df['var5_ref'], df['var5'].clip(upper=150), 0)
-    df['llv_27'] = df['low'].rolling(window=27).min()
-    df['hhv_27'] = df['high'].rolling(window=27).max()
-    df['rsv'] = ((df['close'] - df['llv_27']) / (df['hhv_27'] - df['llv_27'])) * 100
-    df['sma_rsv_5'] = df['rsv'].ewm(alpha=1/5, adjust=False).mean()
-    df['sma_rsv_3'] = df['sma_rsv_5'].ewm(alpha=1/3, adjust=False).mean()
-    df['趨勢'] = 3 * df['sma_rsv_5'] - 2 * df['sma_rsv_3']
-    return df
-
-symbol = st.text_input("🔍 請輸入美股代號：", value="SOXL").strip()
-time_frame = st.radio("⏱️ 選擇分析時框：", ["1分", "5分", "15分", "30分", "1小時", "日線", "週線"], index=1, horizontal=True)
+# --- 介面第一區：隨時換股輸入框 ---
+symbol = st.text_input("🔍 請輸入操作美股代號（支援隨時自由換股）：", value="PLTR").strip().upper()
+time_frame = st.radio("⏱️ 選擇即時時框：", ["5分", "15分", "30分", "1小時", "日線"], index=4, horizontal=True)
 
 if symbol:
-    with st.spinner('雅虎財經連線計算中...'):
+    with st.spinner('HDLW3 雲端高速對接計算中...'):
         raw_data = fetch_yahoo_data(symbol, time_frame)
         if raw_data.empty:
-            st.error(f"❌ 無法取得 {symbol} 數據。請確認美股代號正確。")
+            st.error(f"❌ 無法取得 {symbol} 實時數據，請檢查美股代號。")
         else:
-            df = calculate_hdlw3(raw_data)
+            df = calculate_hdlw3_complete(raw_data)
             curr = df.iloc[-1]
-            price = curr['close']
-            var4_support = curr['var4'] if not pd.isna(curr['var4']) else price * 0.95
-            trend = curr['趨勢']
-            main_gold = curr['主力金']
-            wash_plate = curr['洗盤']
             
-            reason = "📈 趨勢偏弱，目前處於盤整尋底階段。"
-            if main_gold > 0: reason = f"🔥 偵測到【主力金爆發 (值:{main_gold:.1f})】，主力資金吸籌中！"
-            elif wash_plate > 0: reason = f"🟢 偵測到【主力洗盤完畢 (值:{wash_plate:.1f})】，築底完成。"
-            elif trend <= 10: reason = "🟡 進入【準備買】極度超跌區，隨時迎來強烈反彈！"
+            # --- 介面第二區：精準買賣點位看板 (左右並列，手機單手秒看) ---
+            st.markdown(f"### 🎯 {symbol} 即時雙向防守點位")
             
-            st.subheader(f"📊 {symbol.upper()} [{time_frame}] 決策报告")
-            st.metric("當前最新股價", f"${price:.3f}")
-            st.write(f"**💡 進場原因核心判定：** {reason}")
-            st.write("---")
+            # 主報價卡片
+            st.metric(label="當前市價", value=f"${curr['close']:.2f}")
             
-            stop_loss = var4_support * 0.97
+            col_p1, col_p2 = st.columns(2)
+            with col_p1:
+                st.info(f"🛡️ 【最保守買入價】\n\n**${curr['conservative_buy']:.2f}**\n\n*(非此價不輕易出手)*")
+            with col_p2:
+                st.warning(f"🚀 【最激進賣出價】\n\n**${curr['aggressive_sell']:.2f}**\n\n*(多頭極致停利點)*")
             
-            st.markdown(f'<div class="card low-risk"><h3>🟢 低風險策略 (保守抄底)</h3><p><b>👉 建議入場價：</b> ${var4_support:.3f}</p><p><b>🎯 建議停利價：</b> ${price * 1.05:.3f}</p><p><b>🛑 鋼鐵停損價：</b> ${stop_loss:.3f}</p></div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="card med-risk"><h3>🟡 中風險策略 (穩健市價)</h3><p><b>👉 建議入場價：</b> ${price:.3f}</p><p><b>🎯 建議停利價：</b> ${price * 1.10:.3f}</p><p><b>🛑 鋼鐵停損價：</b> ${stop_loss:.3f}</p></div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="card high-risk"><h3>🔴 高風險策略 (當沖追擊)</h3><p><b>👉 建議入場價：</b> ${price * 1.01:.3f}</p><p><b>🎯 建議停利價：</b> ${price * 1.15:.3f}</p><p><b>🛑 鋼鐵停損價：</b> ${stop_loss:.3f}</p></div>', unsafe_allow_html=True)
+            st.markdown("---")
+            
+            # --- 介面第三區：HDLW3 三層全戰況動態審查 ---
+            st.markdown("### 📊 HDLW3 三層戰況系統評估")
+            
+            # 第一層：趨勢
+            if "🔴" in curr['layer_trend']:
+                st.success(f"**【第一層：波段趨勢】** {curr['layer_trend']}")
+            else:
+                st.error(f"**【第一層：波段趨勢】** {curr['layer_trend']}")
+                
+            # 第二層：資金
+            if "🔥" in curr['layer_flow']:
+                st.error(f"**【第二層：大單流向】** {curr['layer_flow']}")
+            else:
+                st.write(f"**【第二層：大單流向】** {curr['layer_flow']}")
+                
+            # 第三層：安全邊際
+            if "✅" in curr['layer_safety']:
+                st.success(f"**【第三層：空間邊際】** {curr['layer_safety']}")
+            else:
+                st.warning(f"**【第三層：空間邊際】** {curr['layer_safety']}")
+                
+            st.markdown("---")
+            
+            # --- 介面第四區：智慧自動買入觸發提醒 ---
+            st.subheader("📋 鸚鵡操盤決策提醒")
+            
+            # 觸發核心買入密語邏輯：
+            # 條件：多頭波段內 + 屬於黃金支撐區(或跌破保守買入) + 主力放量進場
+            if "多頭" in curr['layer_trend'] and (curr['close'] <= curr['var4'] * 1.015 or curr['close'] <= curr['conservative_buy']):
+                if curr['is_volume_spike']:
+                    st.error(f"🚨 🔴 核心提示：【主力資金大單湧入 {symbol} 保守買入區】！完美符合三層黃金共振，請執行買入命令！")
+                else:
+                    st.success("💡 提示：價格已落入最保守買入區附近，但主力大單尚未明顯拉抬，請搬好小板凳，盯緊成交量爆發。")
+            elif "空頭" in curr['layer_trend']:
+                if curr['is_volume_spike']:
+                    st.error("⚠️ 警告：空頭通道出現爆量洗盤或砸盤！大單方向不明，當沖狀態下嚴格禁止盲目接刀。")
+                else:
+                    st.warning("⚠️ 警告：趨勢偏弱，且無主力資金承接。請分批回收現金，多看少動。")
+            else:
+                if curr['close'] >= curr['aggressive_sell'] * 0.98:
+                    st.error(f"🔥 提示：價格已極度逼近【最激進賣出價 (${curr['aggressive_sell']:.2f})】！多頭動能處於短線極速超買頂點，切勿追高，有持倉者建議分批落袋為安。")
+                else:
+                    st.write("📊 提示：股價在通道中間健康震盪。未觸及最保守買入價，亦未到激進賣出價，手癢想沖請輕倉。")
+
+            # 底部署名
+            st.caption(f"ℹ️ HDLW3 動態 Var4 支撐位為: ${curr['var4']:.2f} | 當前距離安全邊際: {curr['safety_margin']:.2f}%")
