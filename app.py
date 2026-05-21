@@ -29,15 +29,31 @@ def calculate_hdlw3_complete(df):
     # 基礎動態支撐 (Var4)
     df['var4'] = df['close'].rolling(window=10).mean() * 0.98
     
-    # 【最保守買入價】：過去10期最低價的最低防守位，或是 Var4 的 99%（取其低者，確保最安全）
+    # 【最保守買入價】
     df['conservative_buy'] = np.minimum(df['low'].rolling(window=10).min(), df['var4'] * 0.99)
     
-    # 【最激進賣出價】：動態通道的極速擴張軌（MA+標準差），或是過去10期最高價的 1.03 倍
+    # 【最激進賣出價】
     df['aggressive_sell'] = np.maximum(df['high'].rolling(window=10).max(), df['close'].rolling(window=10).mean() * 1.05)
     
     # ------------------ 【HDLW3 三層全戰況定義】 ------------------
-    # 第一層：通道波段趨勢 (Trend Layer)
-    df['layer_trend'] = np.where(df['close'] > df['var4'], "🔴 多頭波段（動能續強）", "🟢 空頭防守（靜待打底）")
+    # 基礎安全邊際與距離計算
+    df['safety_margin'] = ((df['close'] - df['var4']) / df['var4']) * 100
+    
+    # 【第一層動態趨勢值 1-100 計算】
+    low_10 = df['close'].rolling(window=10).min()
+    high_10 = df['close'].rolling(window=10).max()
+    # 預防分母為 0 的安全保護機制
+    range_10 = np.where(high_10 == low_10, 1e-5, high_10 - low_10)
+    df['trend_score'] = ((df['close'] - low_10) / range_10) * 100
+    # 嚴格將數值限制在 1 ~ 100 之間
+    df['trend_score'] = np.clip(df['trend_score'], 1, 100)
+    
+    # 第一層：通道波段趨勢 (Trend Layer) -> 整合 1-100 數值顯示 (方案A：精簡括號)
+    trend_desc = np.where(df['close'] > df['var4'], "🔴 多頭波段", "🟢 空頭防守")
+    df['layer_trend'] = [
+        f"{desc} ({score:.0f}) [支撐: ${v4:.2f} / 乖離: {sm:+.2f}%]" 
+        for desc, score, v4, sm in zip(trend_desc, df['trend_score'], df['var4'], df['safety_margin'])
+    ]
     
     # 第二層：主力大單流向 (Money Flow Layer)
     df['vol_ma'] = df['volume'].rolling(window=10).mean()
@@ -45,7 +61,6 @@ def calculate_hdlw3_complete(df):
     df['is_volume_spike'] = df['volume'] > df['vol_ma'] * 1.5
     
     # 第三層：安全空間空間 (Safety Space Layer)
-    df['safety_margin'] = ((df['close'] - df['var4']) / df['var4']) * 100
     df['layer_safety'] = np.where(df['safety_margin'] <= 1.5, "✅ 黃金支撐區（安全邊際高）", "⚠️ 遠離支撐線（嚴防追高滑點）")
     
     return df
@@ -58,12 +73,12 @@ if symbol:
     with st.spinner('HDLW3 雲端高速對接計算中...'):
         raw_data = fetch_yahoo_data(symbol, time_frame)
         if raw_data.empty:
-            st.error(f"❌ 無法取得 {symbol} 實時數據，請檢查美股代號。")
+            st.error(f"❌ 無法取得 {symbol} 實時數據，請檢查美股代號是否正確、或該時框目前是否有盤前交易交易量。")
         else:
             df = calculate_hdlw3_complete(raw_data)
             curr = df.iloc[-1]
             
-            # --- 介面第二區：精準買賣點位看板 (左右並列，手機單手秒看) ---
+            # --- 介面第二區：精準買賣點位看板 ---
             st.markdown(f"### 🎯 {symbol} 即時雙向防守點位")
             
             # 主報價卡片
@@ -80,7 +95,7 @@ if symbol:
             # --- 介面第三區：HDLW3 三層全戰況動態審查 ---
             st.markdown("### 📊 HDLW3 三層戰況系統評估")
             
-            # 第一層：趨勢
+            # 第一層：趨勢（不論多空，皆完整呈現括號內的所有核心量化數值）
             if "🔴" in curr['layer_trend']:
                 st.success(f"**【第一層：波段趨勢】** {curr['layer_trend']}")
             else:
@@ -103,23 +118,44 @@ if symbol:
             # --- 介面第四區：智慧自動買入觸發提醒 ---
             st.subheader("📋 鸚鵡操盤決策提醒")
             
-            # 觸發核心買入密語邏輯：
-            # 條件：多頭波段內 + 屬於黃金支撐區(或跌破保守買入) + 主力放量進場
-            if "多頭" in curr['layer_trend'] and (curr['close'] <= curr['var4'] * 1.015 or curr['close'] <= curr['conservative_buy']):
+            if "🔴" in curr['layer_trend'] and (curr['close'] <= curr['var4'] * 1.015 or curr['close'] <= curr['conservative_buy']):
                 if curr['is_volume_spike']:
                     st.error(f"🚨 🔴 核心提示：【主力資金大單湧入 {symbol} 保守買入區】！完美符合三層黃金共振，請執行買入命令！")
                 else:
                     st.success("💡 提示：價格已落入最保守買入區附近，但主力大單尚未明顯拉抬，請搬好小板凳，盯緊成交量爆發。")
-            elif "空頭" in curr['layer_trend']:
+            elif "🟢" in curr['layer_trend']:
                 if curr['is_volume_spike']:
                     st.error("⚠️ 警告：空頭通道出現爆量洗盤或砸盤！大單方向不明，當沖狀態下嚴格禁止盲目接刀。")
                 else:
                     st.warning("⚠️ 警告：趨勢偏弱，且無主力資金承接。請分批回收現金，多看少動。")
             else:
                 if curr['close'] >= curr['aggressive_sell'] * 0.98:
-                    st.error(f"🔥 提示：價格已極度逼近【最激進賣出價 (${curr['aggressive_sell']:.2f})】！多頭動能處於短線極速超買頂點，切勿追高，有持倉者建議分批落袋為安。")
+                    st.error(f"🔥 提示：價格已極度逼近【最激進賣出價 (${curr['aggressive_sell']:.2f})】！多頭動頭處時處於短線極速超買頂點，切勿追高，有持倉者建議分批落袋為安。")
                 else:
                     st.write("📊 提示：股價在通道中間健康震盪。未觸及最保守買入價，亦未到激進賣出價，手癢想沖請輕倉。")
 
-            # 底部署名
-            st.caption(f"ℹ️ HDLW3 動態 Var4 支撐位為: ${curr['var4']:.2f} | 當前距離安全邊際: {curr['safety_margin']:.2f}%")
+            st.markdown("---")
+
+            # --- 介面第五區：核心指標說明書 ---
+            st.markdown("### 📈 HDLW3 核心量化指標說明書")
+            st.markdown(f"""
+            * **第一層：波段趨勢 `(趨勢值 1-100) [支撐 / 乖離]`**
+                * `🔴 多頭波段`：市價站穩動態均線之上，波段動能看漲。
+                * `🟢 空頭防守`：市價處於動態均線之下，趨勢偏弱應保守。
+                * `[趨勢值含意說明區間]`：
+                    * **【85 ~ 100】極致過熱區**：多頭強烈噴發，短線乖離拉高，盲目追高易套牢。
+                    * **【50 ~ 84】多頭前進區**：多方掌控路權，回踩支撐不破即為健康的多頭蓄勢。
+                    * **【15 ~ 49】空頭震盪區**：市場多空拉鋸，多為反彈或打底階段，結構不穩。
+                    * **【1 ~ 14】超跌伏擊區**：空頭砸盤力道接近衰竭，通常配合第三層出現「黃金支撐」。
+                * `[支撐價格]`：動態 Var4 黃金均線防禦位，趨勢多空的生命線。
+                * `[即時乖離]`：當前價格距離 Var4 的百分比。正值為多頭延伸，負值為超跌打底。
+            * **第二層：大單流向 `(當前量 / 10期均量)`**
+                * `🔥 主力湧入`：當期成交量 > 10期平均成交量 1.5 倍，代表主力大單進場，容易出現大波動。
+                * `💤 散戶縮量`：成交量處於常態均值內，籌碼降溫，多為散戶震盪市。
+            * **第三層：空間邊際 `(距離 Var4 %)`**
+                * `✅ 黃金支撐區`：股價與 Var4 支撐位距離 <= 1.5%，屬於安全邊際極高的低風險伏擊區。
+                * `⚠️ 遠離支撐線`：股價已拉離支撐線 > 1.5%，此時盲目當沖進場容易遭遇短線滑點與回撤風險。
+            """)
+
+            # 最底部分頁簽名
+            st.caption(f"ℹ️ HDLW3 動態 Var4 支撐位為: ${curr['var4']:.2f} | 趨勢強弱度為: {curr['trend_score']:.0f}/100 | 當前距離安全邊際: {curr['safety_margin']:.2f}%")
